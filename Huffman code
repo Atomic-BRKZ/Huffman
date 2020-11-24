@@ -1,0 +1,842 @@
+import java.util.*;
+import java.io.*;
+ 
+
+// CLASE HUFFMAN CODE
+ 
+/**
+ * HUFFMAN CODE
+ * <p><h2>ALGORITMO:</h2>
+ *  
+ * <p>Disponemos de un grupo de mensajes
+ * (los códigos ASCII que puedan aparecer) :
+ * 
+ * <br><code> S = { A1, A2, A3, ... } </code>
+ *
+ * <p>Y de un alfabeto binario (dígitos binarios) :
+ *
+ * <br><code> D = { 0, 1 } </code>
+ *
+ * <p><ol type=1>
+ * <li> Obtener probabilidades de aparición de cada
+ *      mensaje.
+ *
+ *      <br><code> P1, P2, P3, ... </code>
+ *
+ * <li> Ordenar los mensajes en orden decreciente de
+ *      sus probabilidades.
+ * <li> Asignar a los dos últimos mensajes los dígitos
+ *      binarios 0 y 1.
+ * <li> Obtener un nuevo conjunto de mensajes en el
+ *      cual los dos últimos mensajes se unen para
+ *      formar un nuevo mensaje. Su probabilidad es la
+ *      suma de los dos mensajes de donde procede.
+ * <li> Volver al paso 2 si queda más de un mensaje.
+ * </ol>
+ *
+ * <p>Con el proceso anterior hemos construido un árbol.
+ * La codificación del mensaje se obtiene siguiendo el
+ * camino desde el nodo raíz hasta el mensaje.
+ *
+ */
+public class HuffmanCode {
+ 
+//-------------------------------------
+// EXCEPCION DE HUFFMAN
+ 
+    /** 
+     * HuffmanCode.Exception 
+     * es la excepción que lanza esta clase ante un error 
+     */
+    public class Exception extends java.lang.Exception  {
+        public Exception (String msg) {
+            super (msg);
+        }
+    }
+ 
+//-----------------------------------------------
+// CLASE PILA DE BITS
+ 
+    /** 
+     * Simplificación bestial de java.util.BitSet 
+     * No puede ser "inner class" porque no me deja
+     * guardarla con el "serializable". Pensándolo mejor
+     * va a ser 'inner class' y guardaré el array en vez 
+     * de la clase.
+     * <p>El motivo de no usar BitSet es que esta clase va 
+     * creciendo su capacidad a medida que le vas metiendo
+     * bits. Lo que necesito es un tamaño fijo inalterable.
+     */
+    public class BitArray /*implements java.io.Serializable*/ {
+ 
+        /* Un long tiene 8 bytes = 64 bits (64=2^6)
+         * Si tenemos un array de long y queremos hacer
+         * referencia con un índice a un determinado bit, entonces
+         * los 6 últimos bits del índice indicarian el bit
+         * de un elemento del array, y los 58 bits restantes
+         * sirven para indexar el elemento del array.
+         */
+        private long [] bits; 
+        private int numBits;
+ 
+        public BitArray (int numBits) {
+            this (numBits, new long [((numBits-1) >> 6) + 1]);
+        }
+        public BitArray (int numBits, long [] buffer) {
+            this.numBits = numBits;
+            bits = buffer;
+        }
+        public int length () { 
+            return numBits; 
+        }
+        public void set (int index) { 
+            bits [index >> 6] |= (1L << (index & 0x3F));            
+        }
+        public void clear (int index) {
+            bits [index >> 6] &= ~(1L << (index & 0x3F));
+        }
+        public boolean get (int index) {
+            return (bits [index >> 6] & (1L << (index & 0x3F))) != 0;
+        }
+        public long [] getBuffer () {
+            return bits;
+        }
+    }
+ 
+//-------------------------------------
+// CLASE NODO HUFFMAN
+ 
+    /** Los nodos conforman el árbol */
+    protected class Node { 
+ 
+        Node () {
+            reset ();
+        }
+ 
+        public void reset () {
+            parent = NODE_ORPHAN;
+            weight = 0;
+            childZero = NODE_ORPHAN;
+            childOne = NODE_ORPHAN;
+        }
+ 
+        public int parent;    // el padre
+        public int childZero; // el hijo del bit 0
+        public int childOne;  // el hijo del bit 1
+        public int weight;    // peso en bytes
+        public boolean bit;   // true o false
+ 
+    }
+ 
+//-------------------------------------
+// CONSTANTES
+ 
+    protected final static int NUM_ASCII   = 256;             // Número de códigos ASCII
+    protected final static int MAX_ASCII   = NUM_ASCII - 1;   // Mayor código ASCII
+    protected final static int NUM_NODES   = (NUM_ASCII*2-1); // Número de nodos del árbol
+    protected final static int SIZE_BUFFER = 1048576;         // Tamaño del buffer en la E/S en archivos
+ 
+    protected final static int NODE_ORPHAN = -1; // Nodo del árbol sin asignar
+ 
+    protected final static String EXT_HUF = ".huffman"; // Extensión asociada a los archivos de Huffman (comprimidos)
+    protected final static String VERSION = "v0.3"; // Versión del programa y de los archivos que genera
+    protected final static String ID_HUFFMAN = "Huffman " + VERSION; // Identificador de un archivo de Huffman
+ 
+//-----------------------------------------------
+// PROPIEDADES DEL ARBOL
+ 
+    protected int root = NODE_ORPHAN; // Nodo raíz del árbol
+    protected Node [] nodes = new Node [NUM_NODES]; // El árbol (los primeros 256 corresponden a los códigos ASCII)
+    protected Integer [] sorted = new Integer [NUM_NODES]; // Indices de los nodos del árbol ordenados por pesos.
+    protected boolean [][] codes = new boolean [NUM_ASCII][]; // Códigos huffman de los ASCII (indices: ascii y bit)
+ 
+//-----------------------------------------------
+// PROPIEDADES DE LOS ARCHIVOS
+ 
+    protected String pathOriginal = ""; // Nombre del archivo original
+    protected String pathHuffman = "";  // Nombre del archivo comprimido
+ 
+    protected int bytesOriginal = 0; // Total de bytes del archivo original
+    protected int bytesHuffman = 0; // Total de bytes del archivo comprimido
+    protected int bitsHuffman = 0; // Total de bits del archivo comprimido
+ 
+    protected int checkSum = 0; // Suma de los bytes del archivo original (para testeo al expandir)
+ 
+    public String getOriginalPath () { return pathOriginal; }
+    public String getHuffmanPath  () { return pathHuffman; }
+    public int getOriginalSize    () { return bytesOriginal; }
+    public int getHuffmanSize     () { return bytesHuffman; }
+    public int getHuffmanNumBits  () { return bitsHuffman; }
+ 
+//-------------------------------------
+// SOBRE LOS ARCHIVOS
+ 
+    /**
+     *  Indica si es un archivo de Huffman
+     *  mirando su extensión
+     */
+    public static boolean isHuffmanFile (String filename)  {
+        String ext = getExt(filename).toLowerCase ();
+        return EXT_HUF.equals (ext);
+    }
+ 
+    /**
+     *  Cambia la extensión del archivo
+     */
+    protected static String changeExt (String archivo, String nuevaExt) {
+        /*int end = archivo.lastIndexOf ('.');
+        return archivo.substring (0, end) + nuevaExt;*/
+        return archivo + nuevaExt;
+    }
+ 
+    /**
+     *  Obtiene la extensión del archivo
+     *  Ejemplo: getExt ("c:\dir\pepe.txt") -. ".txt"
+     */
+    protected static String getExt (String archivo) {
+        int index = archivo.lastIndexOf ('.');        
+        if (index == -1) 
+          return "";
+        else
+          return archivo.substring (index);
+    }
+ 
+    /** Comprueba que sea un archivo correcto para leer */
+    protected void testFile (String filename) 
+    throws Exception
+    {
+        File file = new File (filename);
+ 
+        if (!file.exists () || !file.canRead () || !file.isFile ()) 
+            throw new Exception ("File \"" + filename + "\" no existe o no es accesible");
+        if (file.length () == 0)
+            throw new Exception ("File \"" + filename + "\" es vacio");
+    }
+ 
+//-----------------------------------------------
+// OBTENER INFORMACIÓN DEL ARBOL
+ 
+    /** Porcentaje de un nodo */
+    protected double perCentNode (int index) {        
+        return (double)nodes[index].weight*100.0 / (double)nodes[root].weight;
+    }
+ 
+    /** Porcentaje de compresión */
+    public double perCentCompress () {
+        if (bytesOriginal == 0) 
+          return 0;
+        else
+          return 100.0 - (double)(bytesHuffman * 100.0) / (double)bytesOriginal;
+        //return 100.0 - (double)(totalBits * 100.0) / (double)(nodes[root].weight * 8.0);
+    }
+ 
+//-----------------------------------------------
+// CONSTRUCTORES
+ 
+    /**
+     *  Constructor del árbol de Huffman
+     */
+    public HuffmanCode () {
+        for (int i=0; i<NUM_NODES; ++i) {
+            nodes[i] = new Node ();
+            sorted[i] = new Integer (i); // Todos los índices del árbol
+        }
+    }
+ 
+    /** Inicializa todo, todo, todo */
+    protected void reset () {
+        root = NODE_ORPHAN;
+ 
+        for (int i=0; i<NUM_NODES; ++i) {
+            nodes[i].reset ();
+            sorted[i] = new Integer (i);
+        }
+        for (int i=0; i<NUM_ASCII; ++i) {
+            codes[i] = null;
+        }
+ 
+        pathOriginal = "";
+        pathHuffman = "";
+ 
+        bytesOriginal = 0;
+        bytesHuffman = 0;
+        bitsHuffman = 0;
+ 
+        checkSum = 0;
+    }
+ 
+//-------------------------------------
+// CREAR EL ARBOL
+ 
+    /**
+     * Crea el árbol a partir de los pesos de cada byte.
+     * Se utiliza en 'readProbability' y 'readHeader'
+     *
+     * Es el algoritmo de HUFFMAN propiamente dicho.
+     * Cuando se llega aquí ya se han de saber los
+     * pesos (probabilidades) de cada código ASCII.
+     * La salida es el árbol de codificación/decodificación.
+     */
+    protected void makeTree ()
+    throws Exception
+    {
+        int numNodes = NUM_ASCII; // Número actual de nodos en el árbol.
+        int parent = NUM_ASCII;   // Nodo padre actual.
+        Comparer comparer = new Comparer ();
+ 
+        int numAscii = getNumAsciiCodes ();
+ 
+        if (numAscii == 0) { // Caso especial: 0 códigos 
+            root = NODE_ORPHAN;
+        }
+        else if (numAscii == 1) { // Caso especial: 1 sólo código (aunque esté repetido)
+            root = MAX_ASCII + 1;
+            int child;
+            for (child=0; child<NUM_ASCII; ++child)
+                if (nodes[child].weight != 0)
+                    break;
+            nodes[parent].weight = nodes[child].weight;
+            nodes[parent].childZero = child;
+            nodes[parent].childOne = NODE_ORPHAN;
+            nodes[child].parent = parent;
+            nodes[child].bit = false;
+        }
+        else // Lo normal: al menos hay dos códigos diferentes
+        {
+          for (int i=0; numNodes>1; --numNodes, ++parent)
+          {
+              // Ordenar en orden creciente de probabilidades
+              Arrays.sort (sorted, i, i+numNodes, comparer);
+ 
+              // Fuera los que son de peso cero
+ 
+              if (numNodes == NUM_ASCII) {
+                  for (i=0; i<NUM_NODES; ++i) {
+                      if (nodes[ sorted[i].intValue() ].weight != 0) {
+                          numNodes -= i;
+                          break;
+                      }
+                  }
+              }
+ 
+              // Los índices de peso más bajo
+ 
+              int cero = sorted[i++].intValue ();
+              int uno = sorted[i++].intValue ();
+ 
+              nodes[cero].bit = false;
+              nodes[uno].bit = true;
+ 
+              nodes[cero].parent = parent;
+              nodes[uno].parent = parent;
+ 
+              nodes[parent].weight = nodes[cero].weight + nodes[uno].weight;
+              nodes[parent].childZero = cero;
+              nodes[parent].childOne = uno;
+          }
+ 
+          root = parent-1;
+ 
+          /*---
+          // Caso especial de un sólo código ASCII (repetido las veces que sea)
+          // afectaría al método Huffman.showTree
+          if (nodes[root].childOne == root)
+              nodes[root].childOne = NODE_ORPHAN;
+          ---*/
+        }
+ 
+        calculeHuffmanFileSize ();
+        calculeHuffmanCodes ();
+    }
+ 
+    // DEBUG
+    /*private void printNodes () {
+        System.out.println ("root: " + root);
+        System.out.println ("root child0: " + nodes[root].childZero);
+        System.out.println ("root child1: " + nodes[root].childOne);
+        System.out.println ("root child0 weight: " + nodes[nodes[root].childZero].weight);
+        System.out.println ("root child1 weight: " + nodes[nodes[root].childOne].weight);
+        System.out.println ("root child0 parent: " + nodes[nodes[root].childZero].parent);
+        System.out.println ("root child1 parent: " + nodes[nodes[root].childOne].parent); 
+ 
+        for (int i=0; i<NUM_ASCII; ++i)
+            if (nodes[i].weight != 0) 
+                println ("Nodo " + i + " pesa " + nodes[i].weight);
+        println ("");
+    }*/
+ 
+    /** Número de códigos ASCII que no tienen peso cero */
+    protected int getNumAsciiCodes () {
+        int numCodes = 0;
+ 
+        for (int n=0; n < NUM_ASCII; ++n) 
+            if (nodes[n].weight != 0)
+                ++numCodes;
+ 
+        return numCodes;
+    }
+ 
+    /**
+     *  Orden creciente de pesos. 
+     *  No ordena el vector nodes, sino que se vale
+     *  del vector nodes para ordenar el vector sorted.
+     *  Clase utilizada por java.util.Arrays.sort en makeTree.
+     */
+    private class Comparer implements Comparator {
+        public int compare (Object obj1, Object obj2) {
+            int indexA = ((Integer)obj1).intValue();
+            int indexB = ((Integer)obj2).intValue();
+            int weightA = nodes[indexA].weight;
+            int weightB = nodes[indexB].weight;   
+            return weightA - weightB; 
+      }   
+    }
+ 
+    /**
+     * Tamaño una vez esté comprimido
+     * Se utiliza en 'makeTree' 
+     */
+    private void calculeHuffmanFileSize () {
+        bitsHuffman = 0;
+        for (int i=0; i < NUM_ASCII; ++i) 
+            if (nodes[i].weight != 0) 
+                bitsHuffman += numBitsOfCode(i) * nodes[i].weight;
+ 
+        bytesHuffman = ((int)Math.ceil ((double)bitsHuffman / 8.0));
+    }
+ 
+    /** Calcula códigos Huffman */
+    private void calculeHuffmanCodes () {
+ 
+        codes = new boolean [NUM_ASCII][]; 
+ 
+        for (int code=0; code < NUM_ASCII; ++code) {
+            if (nodes[code].weight != 0) {
+ 
+                int numBits = numBitsOfCode (code);
+                codes [code] = new boolean [numBits];
+ 
+                int bit = numBits;
+                for (int i=code; i != root; i=nodes[i].parent)                    
+                    codes [code][--bit] = nodes[i].bit;
+            }
+        }
+ 
+        /*--
+        // muestra los codigos DEBUG
+        for (int i=0; i<codes.length; ++i) {
+            if (nodes[i].weight != 0) { 
+                print ("Code " + Integer.toHexString(i) + "=");
+                for (int j=0; j<codes[i].length; ++j)
+                    print ((codes[i][j]?"1":"0"));
+                println (".");
+            }
+        }
+        ---*/        
+    }
+ 
+    /**
+     * Número de bits de un código Huffman
+     * Se utiliza en calculeHuffmanFileSize y calculeHuffmanCodes
+     */
+    protected int numBitsOfCode (int code) {
+        if (nodes[code].weight == 0) 
+            return 0;
+ 
+        int numBits = 0;
+        for (int i = code; i != root; i = nodes[i].parent)
+            ++numBits;  
+ 
+        return numBits;
+    }
+ 
+//-----------------------------------------------
+// COMPRIMIR / EXPANDIR
+ 
+    /**
+     *  Expande el fichero de huffman 
+     */
+    public void expandFile (String filename)
+    throws Exception
+    {  
+        reset ();
+        testFile (filename);
+ 
+ 
+        BitArray bitsCompressed = readHuffman (filename);
+        //showBits (bitsCompressed); // DEBUG
+        expandOriginal (pathOriginal, bitsCompressed);
+    }
+ 
+    /**
+     *  Comprime el archivo
+     */
+    public void compressFile (String filename)
+    throws Exception
+    {
+        reset ();
+        testFile (filename);
+ 
+        BitArray bitsCompressed = compressOriginal (filename);
+        //showBits (bitsCompressed); // DEBUG
+        writeHuffman (changeExt (filename, EXT_HUF), bitsCompressed);
+    }
+ 
+//-----------------------------------------------
+// COMPRIMIR Y EXPANDIR Y LEER Y GUARDAR POR PARTES
+ 
+    /**
+     * Comprime en array el archivo
+     * Primera parte de compressFile
+     */
+    protected BitArray compressOriginal (String filename)
+    throws Exception
+    {
+        BitArray bitsCompressed = null;
+        try {            
+            pathOriginal = filename;
+            print ("CComprimiendo \"" + filename + "\"");
+ 
+            readProbability (filename);
+            bitsCompressed = new BitArray (bitsHuffman);
+ 
+            InputStream input = new BufferedInputStream (new FileInputStream (filename), SIZE_BUFFER);
+ 
+            int index = 0;
+            int code; 
+            while ((code = input.read ()) != -1) {
+                for (int bit=0; bit<codes[code].length; ++bit) {
+                    if (codes[code][bit])
+                        bitsCompressed.set (index);
+                    ++index;
+                }                    
+                //spentTime ();
+            }
+            input.close ();
+ 
+            print (". ");
+ 
+            return bitsCompressed;
+        } 
+        catch (IOException e) {
+            throw new Exception ("no se puede leer \"" + filename + "\"");
+        }
+    }
+ 
+    /**
+     * Guarda los bits en el archivo Huffman
+     * Segunda parte de compressFile
+     */
+    protected void writeHuffman (String filename, BitArray bitsCompressed)
+    throws Exception
+    {
+        try {
+            pathHuffman = filename;
+            print ("escribiendo \"" + filename + "\"");
+ 
+            ObjectOutputStream output = new ObjectOutputStream (new FileOutputStream (filename));
+ 
+            writeHeader (output);
+            output.writeObject (bitsCompressed.getBuffer ()); 
+ 
+            output.flush ();
+            output.close ();
+ 
+            println (" " + roundTwoPlaces (perCentCompress ()) + "%");
+        }
+        catch (IOException e) {
+            e.printStackTrace ();
+            throw new Exception ("no se puede comprimir: \"" + filename + "\"");
+        }        
+    }
+ 
+    /** 
+     * Lee los bits del fichero de Huffman 
+     * Primera parte de 'expandFile'
+     */
+    protected BitArray readHuffman (String filename) 
+    throws Exception
+    {
+        BitArray bitsCompressed = null;
+        try {
+            pathHuffman = filename;
+            print ("Leyendo \"" + filename + "\"");
+ 
+            ObjectInputStream input = new ObjectInputStream (new FileInputStream (filename));
+            readHeader (input);
+            long [] buffer = (long []) input.readObject ();
+            bitsCompressed = new BitArray (bitsHuffman, buffer);
+            input.close ();
+ 
+            print (". ");
+ 
+            return bitsCompressed;
+        }
+        catch (IOException e) {
+            throw new Exception ("No se puede leer \"" + filename + "\"");
+        }
+        catch (ClassNotFoundException e) {
+            throw new Exception ("Clase no encontrada en \"" + filename + "\"");
+        }
+    }
+ 
+    /** 
+     * Guarda los bits en el archivo indicado
+     * Segunda parte de 'expandFile'
+     */
+    protected void expandOriginal (String filename, BitArray bitsCompressed) 
+    throws Exception
+    {
+       try {
+            pathOriginal = filename;
+            print ("Descomprimiendo \"" + filename + "\"");
+ 
+            OutputStream output = new BufferedOutputStream (new FileOutputStream (filename), SIZE_BUFFER);
+ 
+            int sumBytes=0;
+            int index = 0;
+            while (index < bitsCompressed.length ()) {
+ 
+                int code=root; 
+                do {
+                    if (bitsCompressed.get (index++))
+                        code = nodes[code].childOne;
+                    else
+                        code = nodes[code].childZero;
+ 
+                    if (code < 0 || code >= NUM_NODES) {
+                        output.close ();
+                        throw new Exception ("Codigo de los nodos del arbol en \""+ filename +"\"");
+                    }
+ 
+                } while (code > MAX_ASCII); // Mientras no es ASCII (o no sea una hoja del árbol)
+ 
+                output.write (code);
+                sumBytes += code;
+ 
+                //spentTime ();
+            }
+            output.flush ();
+            output.close ();
+ 
+            if (checkSum != sumBytes)
+                throw new Exception ("Suma incorrecta en \"" + filename + "\"");
+ 
+            println (" ok!");
+        }
+        catch (IOException e) {
+            throw new Exception ("No se puede descomprimir \"" + filename + "\"");
+        }
+        catch (IndexOutOfBoundsException e) {
+            throw new Exception ("Indice BitArray fuera de límites en \"" + filename + "\"");
+        }
+    }
+ 
+//-----------------------------------------------
+// PESOS DE LOS ASCII DE UN ARCHIVO
+ 
+    /**
+     *  Leer pesos de cada código ASCII de un archivo
+     *  y crea el árbol de Huffman
+     */
+    protected void readProbability (String filename)
+    throws Exception
+    {
+        int c;
+ 
+        checkSum = 0;
+        bytesOriginal = 0;
+ 
+        try {
+            InputStream input = new BufferedInputStream (new FileInputStream (filename), SIZE_BUFFER);
+ 
+            bytesOriginal = 0;
+ 
+            while ((c = input.read ()) != -1) {
+                nodes[c].weight++;
+                ++bytesOriginal;
+                checkSum += c;                
+            }
+            input.close ();
+ 
+            makeTree ();
+        }
+        catch (IOException e) {
+            throw new Exception ("No se puede leer las probabilidades de  \"" + filename + "\"");
+        }
+    }
+ 
+//-----------------------------------------------
+// ESCRIBIR CABECERA DE UN ARCHIVO DE HUFFMAN
+ 
+    /**
+     *  Grabar el encabezado del archivo de Huffman
+     */
+    protected void writeHeader (ObjectOutputStream output)
+    throws Exception
+    {
+        try {
+            // 1.- Identificador
+            output.writeObject (ID_HUFFMAN);
+ 
+            // 2.- Nombre del fichero original
+            output.writeObject (pathOriginal);
+ 
+            // 3.- Total de bytes del archivo original
+            output.writeInt (bytesOriginal);
+ 
+            // 4.- Comprobación al expandir
+            output.writeInt (checkSum);
+ 
+            // 5.- Escribir códigos ASCII con sus pesos
+            output.writeObject (getAsciiWeights ());
+ 
+            // Almacenar            
+            output.flush ();
+        }
+        catch (IOException e) {
+            throw new Exception ("No se puede escribir el enzabezado de \"" + pathHuffman + "\"");
+        }
+    }
+ 
+    /** Retorna los pesos de los ASCII que tengan pesos */
+    private int [][] getAsciiWeights ()
+    {
+        int [][] array = new int [getNumAsciiCodes()][2];
+        int index = 0;
+        for (int n=0; n < NUM_ASCII; ++n) {
+            if (nodes[n].weight != 0) {
+                array [index][0] = n;
+                array [index][1] = nodes[n].weight;    
+                ++index;
+            }
+        }
+        return array;
+    }
+ 
+//-----------------------------------------------
+// LEER CABECERA DE UN ARCHIVO DE HUFFMAN
+ 
+    /**
+     *  Leemos la cabecera del archivo de Huffman
+     */
+    protected void readHeader (String filename) 
+    throws Exception
+    {
+        try {
+            ObjectInputStream input = new ObjectInputStream (new FileInputStream (filename));
+            pathHuffman = new String (filename);
+            readHeader (input);        
+            input.close ();
+        }
+        catch (IOException e) {
+            throw new Exception ("No se puede abrir el encabezado de \"" + filename + "\"");
+        }
+ 
+    }
+ 
+    /**
+     *  Leemos la cabecera del archivo de Huffman
+     */
+    protected void readHeader (ObjectInputStream input) 
+    throws Exception
+    {
+        try {
+            // 1.- Leer identificador
+            String id = (String) input.readObject ();
+ 
+            if (!id.equals (ID_HUFFMAN)) {
+                input.close ();
+                throw new Exception ("\"" + pathHuffman + "\" no es un archivo Huffman");
+            }
+ 
+            // 2.- Leer nombre del fichero original
+            pathOriginal = (String) input.readObject ();
+ 
+            // 3.- Leer suma de los bytes del archivo original (para comprobación al expandir)
+            bytesOriginal = input.readInt ();
+ 
+            // 4.- Leer suma de los bytes del archivo original (para comprobación al expandir)
+            checkSum = input.readInt ();
+ 
+            // 5.- Leer códigos ASCII con sus pesos
+            copyAsciiWeightsToNodes ((int [][]) input.readObject ());
+ 
+            makeTree ();
+        }
+        catch (IOException e) {
+            throw new Exception ("Encabezado equivocado en \"" + pathHuffman + "\"");
+        }
+        catch (ClassNotFoundException e) {
+            throw new Exception ("Clase no encontrada en el encabezado de  \"" + pathHuffman + "\"");
+        }
+    }
+ 
+    /** Copia los pesos de los códigos Ascii a los nodos del árbol */
+    private void copyAsciiWeightsToNodes (int [][] array)
+    throws Exception
+    {
+        for (int i=0; i<array.length; ++i) {
+            int ascii = array[i][0];
+            int weight = array[i][1];
+ 
+            if (nodes[ascii].weight != 0) 
+                throw new Exception ("Codigo ascii repetido");
+ 
+            nodes [ascii].weight = weight;
+        }
+    }
+ 
+//-----------------------------------------------
+// PRINT
+ 
+    protected void print (String text) { 
+        //System.out.print (text); // Comentar para ocultar mensajes
+    }
+    protected void println (String text) {
+        //System.out.println (text); // Comentar para ocultar mensajes
+    }
+ 
+     /** Redondeo a dos decimales */
+    private static String roundTwoPlaces (double num) {
+        double result = ((int)(num * 100)) / ((double)100);
+        String str = Double.toString (result);
+        if ((str.length() - str.indexOf('.')) < 3) // Siempre dos decimales
+            str = str + "0";
+        return str;
+    }
+ 
+//-----------------------------------------------
+// MAIN DE EJEMPLO
+ 
+    public static void main (String [] args) {
+        if (args.length == 0) {
+            System.out.println ("Forma de uso:"); 
+            System.out.println (" -Para comprimir: java HuffmanCode archivo");
+            System.out.println (" -Para expandir:  java HuffmanCode archivo.huffman");
+        }
+        else {
+            HuffmanCode hc = new HuffmanCode ();
+ 
+            try {
+                for (int i=0; i<args.length; ++i) {
+                    if (isHuffmanFile (args[i])) {
+                        System.out.println ("Expandiendo " + args [i]);
+                        hc.expandFile (args[i]);
+                    }
+                    else {
+                        System.out.println ("Comprimiendo " + args[i]);
+                        hc.compressFile (args[i]);
+                    }
+                }        
+            }
+            catch (HuffmanCode.Exception e) {
+                System.out.println ("\nError: " + e.getMessage ());
+            }
+        }
+    }
+ 
+} // class HuffmanCode
+ 
+//-------------------------------------
+// End Source File
